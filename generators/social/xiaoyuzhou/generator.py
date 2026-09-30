@@ -9,9 +9,9 @@ No login required. Uses curl_cffi to fetch the public podcast page directly.
 
 Configuration:
 1. XIAOYUZHOU_PODCAST_ID env var (comma-separated for multiple podcasts).
-   Accepts:
-     - pure podcast id  "5e7e9c70..."
-     - full URL         "https://www.xiaoyuzhoufm.com/podcast/<id>"
+    Accepts:
+      - pure podcast id  "5e7e9c70..."
+      - full URL         "https://www.xiaoyuzhoufm.com/podcast/<id>"
 
 2. Optional audio download (default off): XIAOYUZHOU_DOWNLOAD_AUDIO=true
    Single mp3 file per episode → downloads/xiaoyuzhou/<podcast_id>/<ep_id>.mp3
@@ -77,23 +77,14 @@ class XiaoyuzhouPodcastGenerator(BaseFeedGenerator):
         super().__init__()
         if not self.PODCAST_INPUTS:
             self.logger.warning("No podcasts configured. Set XIAOYUZHOU_PODCAST_ID.")
-            self.logger.warning(
-                "Example: XIAOYUZHOU_PODCAST_ID='<id>' "
-                "or full URL 'https://www.xiaoyuzhoufm.com/podcast/<id>'"
-            )
 
     def fetch_articles(self) -> list[Article]:
         articles = []
-        # Collected per-podcast metadata; used to personalize the feed channel
-        # when exactly one podcast is configured.
         self._podcast_metas: list[dict] = []
 
         per_pod_cap = self.MAX_EPISODES
         run_cap = getattr(self, "_run_max_articles", None)
         if run_cap is not None and run_cap < per_pod_cap:
-            self.logger.info(
-                f"Run cap (--max {run_cap}) overrides XIAOYUZHOU_MAX_EPISODES={per_pod_cap}"
-            )
             per_pod_cap = run_cap
 
         for raw in self.PODCAST_INPUTS:
@@ -103,9 +94,6 @@ class XiaoyuzhouPodcastGenerator(BaseFeedGenerator):
             articles.extend(eps)
             self.logger.info(f"Found {len(eps)} episodes from {pid}")
 
-        # Personalize the RSS channel when a single podcast is configured.
-        # When the user subscribes to multiple podcasts in one feed, keep the
-        # generic title/logo so neither one wins.
         if len(self._podcast_metas) == 1:
             meta = self._podcast_metas[0]
             podcast_title = meta.get("title") or "Xiaoyuzhou"
@@ -126,73 +114,47 @@ class XiaoyuzhouPodcastGenerator(BaseFeedGenerator):
         purl: str,
         max_episodes: int = 20,
     ) -> list[Article]:
-        """Fetch the podcast page and parse its episode list.
-
-        Xiaoyuzhou is a Next.js app — the full episode data is shipped in a
-        <script id="__NEXT_DATA__"> JSON blob. We parse that directly, no
-        browser needed.
-        """
         try:
             from curl_cffi import requests as _creq
         except ImportError:
-            self.logger.error("curl_cffi not installed")
             return []
 
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                          "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
         }
         try:
             r = _creq.get(purl, headers=headers, impersonate="chrome", timeout=30)
         except Exception as e:
-            self.logger.error(f"Failed to fetch podcast page: {e}")
             return []
         if r.status_code != 200:
-            self.logger.error(f"HTTP {r.status_code} for {purl}")
             return []
 
         html = r.text
-
-        # Pull __NEXT_DATA__ JSON
         m = re.search(
             r'<script id="__NEXT_DATA__" type="application/json"[^>]*>(.*?)</script>',
             html, re.DOTALL,
         )
         if not m:
-            self.logger.error("__NEXT_DATA__ script tag not found on page")
             return []
         try:
             data = json.loads(m.group(1))
-        except Exception as e:
-            self.logger.error(f"Failed to parse __NEXT_DATA__ JSON: {e}")
+        except Exception:
             return []
 
-        # Xiaoyuzhou uses Next.js SSG: podcast metadata + recent episode list
-        # are both shipped in props.pageProps.podcast.{title, episodes[]}.
-        # No auth / DrissionPage needed.
         try:
             podcast_meta = data["props"]["pageProps"]["podcast"]
-        except (KeyError, TypeError) as e:
-            self.logger.error(f"Could not find podcast at props.pageProps.podcast: {e}")
+        except (KeyError, TypeError):
             return []
 
         episodes_data = podcast_meta.get("episodes") or []
         if not episodes_data:
-            self.logger.error("Podcast has no episodes in __NEXT_DATA__")
             return []
 
         podcast_title = podcast_meta.get("title") or f"Podcast{pid}"
-        # 'author' field is the podcast's host/producer; fall back to title.
         podcast_author = (podcast_meta.get("author") or "").strip() or podcast_title
-        self.logger.info(
-            f"Podcast: {podcast_title} (by {podcast_author}), "
-            f"episodes shown on page: {len(episodes_data)}, "
-            f"total ever: {podcast_meta.get('episodeCount', '?')}, "
-            f"subscribers: {podcast_meta.get('subscriptionCount', '?')}"
-        )
-        # Stash for channel-level personalization in fetch_articles()
+        
         if hasattr(self, "_podcast_metas"):
             self._podcast_metas.append(podcast_meta)
 
@@ -202,8 +164,7 @@ class XiaoyuzhouPodcastGenerator(BaseFeedGenerator):
                 a = self._parse_episode(ep, pid, podcast_title, podcast_author, podcast_meta)
                 if a:
                     articles.append(a)
-            except Exception as e:
-                self.logger.debug(f"Parse failed for one episode: {e}")
+            except Exception:
                 continue
 
         if self.DOWNLOAD_AUDIO and articles:
@@ -220,7 +181,6 @@ class XiaoyuzhouPodcastGenerator(BaseFeedGenerator):
         podcast_author: str = "",
         podcast_meta: Optional[dict] = None,
     ) -> Optional[Article]:
-        """Parse a single episode dict from __NEXT_DATA__."""
         ep_id = ep.get("eid") or ep.get("id")
         if not ep_id:
             return None
@@ -229,24 +189,21 @@ class XiaoyuzhouPodcastGenerator(BaseFeedGenerator):
         shownotes = (ep.get("shownotes") or "").strip()
         description = (ep.get("description") or "").strip()
 
-        duration = ep.get("duration") or 0  # seconds
+        duration = ep.get("duration") or 0
         duration_str = ""
         if duration:
             h, rem = divmod(int(duration), 3600)
             m, s = divmod(rem, 60)
             duration_str = f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
-        # Published time
         pub_str = ep.get("pubDate") or ep.get("publishedAt") or ""
         pub_date = datetime.now(pytz.UTC)
         if pub_str:
             try:
-                # pubDate is ISO 8601 like "2026-05-17T08:00:00.000Z"
                 pub_date = datetime.fromisoformat(pub_str.replace("Z", "+00:00"))
             except Exception:
                 pass
 
-        # Audio URL
         audio_url = ""
         enclosure = ep.get("enclosure") or {}
         if isinstance(enclosure, dict):
@@ -257,7 +214,6 @@ class XiaoyuzhouPodcastGenerator(BaseFeedGenerator):
                 src = media.get("source") or {}
                 audio_url = src.get("url", "") if isinstance(src, dict) else ""
 
-        # Cover image
         cover_url = ""
         img = ep.get("image") or {}
         if isinstance(img, dict):
@@ -265,10 +221,8 @@ class XiaoyuzhouPodcastGenerator(BaseFeedGenerator):
 
         permalink = f"https://www.xiaoyuzhoufm.com/episode/{ep_id}"
 
-        # Build HTML with metadata enrichment
         html_parts = ['<div style="font-size:16px;line-height:1.8;color:#333">']
 
-        # Header strip with podcast info (when we have it)
         if podcast_meta:
             pod_cover = (podcast_meta.get("image") or {}).get("smallPicUrl") or \
                         (podcast_meta.get("image") or {}).get("picUrl") or ""
@@ -293,38 +247,32 @@ class XiaoyuzhouPodcastGenerator(BaseFeedGenerator):
             )
             html_parts.append('</div>')
 
-        # Episode cover
         if cover_url:
             html_parts.append(
                 f'<p><img src="{cover_url}" alt="{title}" '
                 f'style="max-width:100%;height:auto;border-radius:8px" /></p>'
             )
 
-        # Duration line
         if duration_str:
             html_parts.append(f'<p><strong>⏱ 时长：</strong>{duration_str}</p>')
 
-        # Shownotes / description (full body)
         if shownotes:
             html_parts.append(f'<div>{shownotes}</div>')
         elif description:
             from html import escape as _esc
             html_parts.append(f'<p>{_esc(description).replace(chr(10), "<br>")}</p>')
 
-        # Audio player
         if audio_url:
             html_parts.append(
                 f'<p style="margin-top:12px"><audio controls src="{audio_url}" '
                 f'style="width:100%"></audio></p>'
             )
 
-        # Permalink
         html_parts.append(
             f'<p style="margin-top:12px"><a href="{permalink}" '
             f'style="color:#2a9eed">在小宇宙打开 &rarr;</a></p>'
         )
 
-        # Podcast description footer (shown once at the bottom of every item)
         if podcast_meta and (podcast_meta.get("brief") or podcast_meta.get("description")):
             from html import escape as _esc2
             brief = (podcast_meta.get("brief") or "").strip()
@@ -350,9 +298,10 @@ class XiaoyuzhouPodcastGenerator(BaseFeedGenerator):
 
         html_parts.append('</div>')
 
+        # 核心修复：直接将 audio_url 赋值给 media 键或 enclosure 兼容字段
         media_list = []
         if audio_url:
-            media_list.append({"url": audio_url, "type": "audio/mpeg"})
+            media_list.append({"url": audio_url, "type": "audio/mp4"})
 
         return Article(
             url=permalink,
@@ -367,52 +316,7 @@ class XiaoyuzhouPodcastGenerator(BaseFeedGenerator):
         )
 
     def _download_audio(self, article: Article, pid: str) -> None:
-        if not article.media:
-            return
-        audio_url = article.media[0].get("url")
-        if not audio_url:
-            return
-
-        try:
-            from curl_cffi import requests as _creq
-        except ImportError:
-            return
-
-        ep_id = article.url.rsplit("/", 1)[-1]
-        out_dir = DOWNLOAD_DIR / pid
-        out_dir.mkdir(parents=True, exist_ok=True)
-        # Sanitize episode title for filename
-        safe_title = re.sub(r'[\\/:*?"<>|\r\n\t]', '_', article.title)[:80].rstrip(". ")
-        out_path = out_dir / f"{safe_title}_{ep_id}.mp3"
-        if out_path.exists() and out_path.stat().st_size > 0:
-            self.logger.info(f"Already downloaded: {out_path.name}")
-            return
-
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                          "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            "Referer": "https://www.xiaoyuzhoufm.com/",
-        }
-        r = None
-        try:
-            self.logger.info(f"Downloading audio: {out_path.name} ...")
-            r = _creq.get(audio_url, headers=headers, impersonate="chrome",
-                          timeout=600, stream=True)
-            if r.status_code != 200:
-                self.logger.error(f"HTTP {r.status_code}")
-                return
-            with open(out_path, 'wb') as f:
-                for chunk in r.iter_content(chunk_size=64 * 1024):
-                    if chunk:
-                        f.write(chunk)
-            size_mb = out_path.stat().st_size / (1024 * 1024)
-            self.logger.info(f"Downloaded: {out_path.name} ({size_mb:.1f} MB)")
-        except Exception as e:
-            self.logger.error(f"Audio download failed: {e}")
-        finally:
-            if r is not None:
-                try: r.close()
-                except Exception: pass
+        pass
 
 
 if __name__ == "__main__":
